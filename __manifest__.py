@@ -13,9 +13,10 @@
     """,
     'author': 'Shahriar Ahmed - BJIT Limited',
     'website': 'https://www.yourcompany.com',
-    'depends': ['base', 'product', 'stock', 'sale'],
+    'depends': ['base', 'mail', 'product', 'stock', 'sale', 'sale_management'],
     'data': [
-        # 'security/ir.model.access.csv',
+        'security/ir.model.access.csv',
+        'views/vehicle_views.xml',
     ],
     'installable': True,
     'auto_install': False,

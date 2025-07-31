@@ -1,12 +1,39 @@
 from odoo import http, _
 from odoo.http import request
-import jwt
-import datetime
 import secrets
 import string
-from werkzeug.exceptions import Unauthorized
 
 class UserSignupAPI(http.Controller):
+    @http.route('/api/otp/send', type='json', auth='none', methods=['POST'], csrf=False, cors='*')
+    def send_otp(self, **kwargs):
+        email = kwargs.get('email')
+
+        if not email:
+            return {'error': 'Email is required'}, 400
+
+        existing_user = request.env['res.users'].sudo().search([('login', '=', email)], limit=1)
+        if existing_user:
+            return {'error': 'Email is already registered'}, 409
+
+        otp_record = request.env['customer.otp'].sudo().generate_otp(email)
+        if not otp_record:
+            return {'error': 'Failed to generate OTP'}, 500
+
+        try:
+            email_values = {
+                'email_from': 'noreply@yourcompany.com',
+                'email_to': email,
+                'subject': 'Your OTP Code',
+                'body_html': f'<p>Your OTP code is: <strong>{otp_record.otp}</strong>. It is valid for 5 minutes.</p>'
+            }
+            mail = request.env['mail.mail'].sudo().create(email_values)
+            mail.sudo().send()
+        except Exception as e:
+            print(f"Error details: {str(e)}")
+            return {'error': f'Failed to send OTP email: {str(e)}'}, 500
+
+        return {'success': True, 'message': f'OTP sent to {email}'}
+
     def _get_base_url(self, request):
         if request.httprequest.headers.get('X-Forwarded-Host'):
             protocol = 'https' if request.httprequest.headers.get('X-Forwarded-Proto') == 'https' else 'http'
@@ -22,32 +49,12 @@ class UserSignupAPI(http.Controller):
 
             api_reset_link = f"{base_url}/api/reset_password"
 
-            email_body = f"""Dear {user_name},<br><br>
-
-                        Your account has been created successfully.<br><br>
-                        
-                        Login: {user.login}<br>
-                        Current Password: {password}<br>
-                        Reset Password Link: {api_reset_link}<br><br>
-                        
-                        Please change your password ASAP for security reasons.<br><br>
-                        
-                        Best regards,<br>
-                        The Platform Team"""
-
-            from_email = admin_env.company.email or 'noreply@company.com'
-
-            mail_values = {
-                'subject': 'Account Created - Login Details',
-                'body_html': email_body,
-                'email_to': user.email,
-                'email_from': from_email,
-                'auto_delete': True,
+            template = admin_env.ref('product_rest_api.customer_signup_account_created_template')
+            ctx = {
+                'password': password,
+                'reset_link': api_reset_link,
             }
-
-            mail = admin_env['mail.mail'].sudo().create(mail_values)
-            mail.send()
-            print("Simple login email sent")
+            template.with_context(ctx).sudo().send_mail(user.id, force_send=True)
 
             try:
                 user.action_reset_password()
@@ -58,9 +65,6 @@ class UserSignupAPI(http.Controller):
             return True
 
         except Exception as e:
-            print(f"Email sending failed: {e}")
-            import traceback
-            print(f"Email error traceback: {traceback.format_exc()}")
             return False
 
     @http.route('/api/signup', type='json', auth='none', methods=['POST'], csrf=False, cors='*')
@@ -69,13 +73,17 @@ class UserSignupAPI(http.Controller):
         try:
             name = kwargs.get('name')
             email = kwargs.get('email')
-            phone = kwargs.get('phone')
+            otp = kwargs.get('otp')
 
-            if not name and not email:
-                return {'error': 'Missing required fields: name, email'}, 400
+            if not name or not email or not otp:
+                return {'error': 'Missing required fields: name, email, otp'}, 400
 
             if '@' not in email:
                 return {'error': 'Invalid email format'}, 400
+
+            otp_record = request.env['customer.otp'].sudo().search([('email', '=', email)], limit=1)
+            if not otp_record or otp_record.otp != otp:
+                return {'error': 'Invalid or expired OTP'}, 401
 
             characters = string.ascii_letters + string.digits + "!@#$%&*"
             generated_password = ''.join(secrets.choice(characters) for i in range(12))
@@ -86,7 +94,6 @@ class UserSignupAPI(http.Controller):
                     admin_user = request.env['res.users'].sudo().search([('id', '=', 2)], limit=1)
                 if not admin_user or not admin_user.exists():
                     admin_user = request.env['res.users'].sudo().search([('id', '=', 1)], limit=1)
-
                 if not admin_user or not admin_user.exists():
                     return {'error': 'No admin user found'}, 500
 
@@ -103,7 +110,6 @@ class UserSignupAPI(http.Controller):
                 }, 409
 
             company = admin_env['res.company'].sudo().browse(1)
-            # company = admin_user.company_id
             if not company:
                 return {'error': 'No company found'}, 500
 
@@ -141,32 +147,11 @@ class UserSignupAPI(http.Controller):
                     'is_company': False,
                     'customer_rank': 1,
                 }
-                if phone:
-                    partner_updates['phone'] = phone
-
                 partner.sudo().write(partner_updates)
+                otp_record.sudo().unlink()
 
             except Exception as partner_err:
-                print(f"Partner update error: {partner_err}")
-                if new_user:
-                    try:
-                        new_user.sudo().unlink()
-                    except Exception as cleanup_err:
-                        print(f"User cleanup failed: {cleanup_err}")
                 return {'error': f'Partner update failed: {str(partner_err)}'}, 500
-
-            token = None
-            try:
-                secret_key = admin_env['ir.config_parameter'].sudo().get_param('jwt.secret_key') or 'odoo_default_secret'
-                expiration = datetime.datetime.utcnow() + datetime.timedelta(hours=24)
-                payload = {
-                    'user_id': new_user.id,
-                    'email': email,
-                    'exp': expiration
-                }
-                token = jwt.encode(payload, secret_key, algorithm='HS256')
-            except Exception as jwt_err:
-                print(f"JWT generation failed: {jwt_err}")
 
             try:
                 self._send_login_email(admin_env, new_user, generated_password, name)
@@ -174,20 +159,11 @@ class UserSignupAPI(http.Controller):
             except Exception as email_err:
                 email_sent = False
 
-            try:
-                admin_env.cr.commit()
-            except Exception as commit_err:
-                print(f"Commit failed: {commit_err}")
-            verification_user = admin_env['res.users'].sudo().search([('login', '=', email)], limit=1)
-            if not verification_user:
-                return {'error': 'User created but not findable - possible database issue'}, 500
-
             return {
                 'success': True,
                 'message': f'Account created successfully for {name}',
                 'customer_id': partner.id,
                 'user_id': new_user.id,
-                'token': token,
                 'login_email': email,
                 'generated_password': generated_password,
                 'email_sent': email_sent,
@@ -196,9 +172,6 @@ class UserSignupAPI(http.Controller):
             }
 
         except Exception as e:
-            if new_user:
-                new_user.sudo().unlink()
-
             return {'error': f'Account creation failed: {str(e)}'}, 500
 
     @http.route('/api/reset_password', type='json', auth='none', methods=['POST'], csrf=False, cors='*')
@@ -245,7 +218,6 @@ class UserSignupAPI(http.Controller):
                 return {'error': 'Invalid current password'}, 401
 
             user.sudo().write({'password': new_password})
-            admin_env.cr.commit()
 
             return {
                 'success': True,

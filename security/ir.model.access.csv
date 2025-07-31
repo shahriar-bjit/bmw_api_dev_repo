@@ -1,0 +1,3 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_customer_otp_user,access.customer.otp.user,model_customer_otp,base.group_user,1,1,1,1
+access_vehicle_management_user,access.vehicle.management.user,model_vehicle_management,base.group_user,1,1,1,1

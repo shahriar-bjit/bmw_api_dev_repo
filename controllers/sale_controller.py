@@ -1,6 +1,6 @@
 from odoo import http, fields
 from odoo.http import request
-import json
+
 
 class SaleOrderAPIController(http.Controller):
 
@@ -12,28 +12,44 @@ class SaleOrderAPIController(http.Controller):
             if token != configured_key:
                 return {'error': 'Unauthorized'}, 401
 
-            customer_id = kwargs.get('customer_id')
-            payment_status = kwargs.get('payment_status')
-            order_lines = kwargs.get('order_lines', [])
+            products = kwargs.get('products', [])
+            payment_status = kwargs.get('payment_status', '').lower()
+            delivery_address = kwargs.get('delivery_address')
 
-            if not customer_id:
-                return {'error': 'Missing customer_id'}, 400
-            if not isinstance(order_lines, list) or not order_lines:
-                return {'error': 'Invalid or missing order_lines'}, 400
+            if not products or not isinstance(products, list):
+                return {'error': 'Invalid or missing products list'}, 400
 
             system_user = request.env.ref('base.user_admin')
 
+            customer = request.env['res.partner'].sudo().search([('customer_rank', '>', 0)], limit=1)
+            if not customer:
+                return {'error': 'No customer found in the system'}, 400
+
+            if delivery_address:
+                delivery_partner = request.env['res.partner'].sudo().create({
+                    'name': customer.name + ' (Delivery)',
+                    'street': delivery_address,
+                    'type': 'delivery',
+                    'parent_id': customer.id,
+                })
+            else:
+                delivery_partner = customer
+
             sale_order = request.env['sale.order'].with_user(system_user).sudo().create({
-                'partner_id': customer_id
+                'partner_id': customer.id,
+                'partner_shipping_id': delivery_partner.id,
             })
 
-            for line in order_lines:
-                product_id = line.get('product_id')
+            for line in products:
+                product_code = line.get('product_code')
                 quantity = line.get('quantity', 1)
 
-                product = request.env['product.product'].sudo().browse(product_id)
-                if not product.exists():
-                    return {'error': f'Product ID {product_id} not found'}, 400
+                if not product_code:
+                    return {'error': 'Missing product_code in line item'}, 400
+
+                product = request.env['product.product'].sudo().search([('default_code', '=', product_code)], limit=1)
+                if not product:
+                    return {'error': f'Product with code {product_code} not found'}, 400
 
                 request.env['sale.order.line'].with_user(system_user).sudo().create({
                     'order_id': sale_order.id,
@@ -43,55 +59,56 @@ class SaleOrderAPIController(http.Controller):
                     'name': product.name,
                 })
 
-            sale_order.with_user(system_user).action_confirm()
-
-            pickings = sale_order.picking_ids.filtered(lambda p: p.state not in ['done', 'cancel'])
-
-            for picking in pickings:
-                picking.action_confirm()
-                picking.action_assign()
-
-                for move in picking.move_ids_without_package:
-                    move.move_line_ids.unlink()
-
-                    request.env['stock.move.line'].sudo().create({
-                        'move_id': move.id,
-                        'picking_id': picking.id,
-                        'product_id': move.product_id.id,
-                        'product_uom_id': move.product_uom.id,
-                        'qty_done': move.product_uom_qty,
-                        'location_id': move.location_id.id,
-                        'location_dest_id': move.location_dest_id.id,
-                    })
-
-                picking.button_validate()
-
-            invoice = sale_order._create_invoices()
+            invoice = None
 
             if payment_status == 'paid':
-                journal = request.env['account.journal'].sudo().search([('type', '=', 'bank')], limit=1)
-                if not journal:
-                    return {'error': 'No bank journal found'}, 500
+                if sale_order.state == 'draft':
+                    sale_order.with_user(system_user).action_confirm()
 
-                payment_wizard = request.env['account.payment.register'].sudo().with_context(
-                    active_model='account.move',
-                    active_ids=invoice.ids
-                ).create({
-                    'payment_date': fields.Date.today(),
-                    'journal_id': journal.id,
-                    'amount': invoice.amount_total,
-                })
-                payment_wizard.action_create_payments()
+                pickings = sale_order.picking_ids.filtered(lambda p: p.state not in ['done', 'cancel'])
+                for picking in pickings:
+                    picking.action_confirm()
+                    picking.action_assign()
 
-            if sale_order.partner_id.email:
-                template = request.env.ref('account.email_template_edi_invoice')
-                invoice.message_post_with_template(template.id)
+                    for move in picking.move_ids_without_package:
+                        move.move_line_ids.unlink()
+                        request.env['stock.move.line'].sudo().create({
+                            'move_id': move.id,
+                            'picking_id': picking.id,
+                            'product_id': move.product_id.id,
+                            'product_uom_id': move.product_uom.id,
+                            'qty_done': move.product_uom_qty,
+                            'location_id': move.location_id.id,
+                            'location_dest_id': move.location_dest_id.id,
+                        })
+
+                    picking.button_validate()
+
+                invoice = sale_order._create_invoices()
+                invoice = invoice and invoice.exists() and invoice[0] or None
+
+                if invoice:
+                    invoice.action_post()
+
+                    journal = request.env['account.journal'].sudo().search([('type', '=', 'bank')], limit=1)
+                    if not journal:
+                        return {'error': 'No bank journal found'}, 500
+
+                    payment_wizard = request.env['account.payment.register'].sudo().with_context(
+                        active_model='account.move',
+                        active_ids=invoice.ids
+                    ).create({
+                        'payment_date': fields.Date.today(),
+                        'journal_id': journal.id,
+                        'amount': invoice.amount_total,
+                    })
+                    payment_wizard.action_create_payments()
 
             return {
-                "message": "Sale Order and Invoice created successfully",
-                "sale_order_id": sale_order.id,
-                "invoice_id": invoice.id,
-                "status": payment_status
+                "message": "Sale Order created successfully",
+                "sale_order": sale_order.name,
+                "invoice": invoice.name if invoice else None,
+                "status": payment_status.capitalize() or 'Unpaid'
             }
 
         except Exception as e:
