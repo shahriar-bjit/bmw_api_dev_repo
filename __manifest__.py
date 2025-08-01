@@ -17,6 +17,7 @@
     'data': [
         'security/ir.model.access.csv',
         'views/vehicle_views.xml',
+        'views/res_partner_views.xml',
     ],
     'installable': True,
     'auto_install': False,

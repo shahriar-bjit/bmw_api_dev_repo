@@ -1,9 +1,7 @@
 from odoo import http, fields
 from odoo.http import request
 
-
 class SaleOrderAPIController(http.Controller):
-
     @http.route('/api/create_order', type='json', auth='none', methods=['POST'], csrf=False, cors='*')
     def create_order(self, **kwargs):
         try:
@@ -111,5 +109,55 @@ class SaleOrderAPIController(http.Controller):
                 "status": payment_status.capitalize() or 'Unpaid'
             }
 
+        except Exception as e:
+            return {'error': str(e)}, 500
+
+    @http.route('/api/track_order', type='json', auth='none', methods=['POST'], csrf=False, cors='*')
+    def track_order(self, **kwargs):
+        try:
+            token = request.httprequest.headers.get('X-API-Key')
+            configured_key = request.env['ir.config_parameter'].sudo().get_param('api.product_access_key')
+            if token != configured_key:
+                return {'error': 'Unauthorized'}, 401
+
+            sale_order_id = kwargs.get('sale_order_id')
+            if not sale_order_id:
+                return {'status': 'Failure', 'reason': 'Missing sale_order_id'}, 400
+
+            sale_order = request.env['sale.order'].sudo().browse(int(sale_order_id))
+            if not sale_order:
+                return {'status': 'Failure', 'reason': 'Sale Order not found'}, 404
+
+            order_lines = []
+            for line in sale_order.order_line:
+                order_lines.append({
+                    'product': line.product_id.name,
+                    'quantity': line.product_uom_qty,
+                    'unit_price': line.price_unit,
+                    'subtotal': line.price_subtotal,
+                })
+
+            payment_state = sale_order.invoice_status
+
+            if payment_state == 'invoiced':
+                payment_status = 'Paid' if all(inv.payment_state == 'paid' for inv in sale_order.invoice_ids) else 'Unpaid'
+            else:
+                payment_status = 'Not Invoiced'
+
+            if sale_order.picking_ids:
+                delivered = all(p.state == 'done' for p in sale_order.picking_ids)
+                delivery_status = 'Shipped' if delivered else 'Pending'
+            else:
+                delivery_status = 'No Delivery'
+
+            return {
+                'status': 'Success',
+                'order_id': sale_order.id,
+                'customer': sale_order.partner_id.name,
+                'order_lines': order_lines,
+                'total_amount': sale_order.amount_total,
+                'payment_status': payment_status,
+                'delivery_status': delivery_status
+            }
         except Exception as e:
             return {'error': str(e)}, 500

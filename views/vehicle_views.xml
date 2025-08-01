@@ -39,8 +39,6 @@
             <field name="view_mode">list,form</field>
         </record>
 
-        <menuitem id="menu_vehicle_root" name="Vehicles" parent="sale.sale_menu_root" sequence="35"/>
-        <menuitem id="menu_vehicle" name="Vehicles" parent="menu_vehicle_root" action="action_vehicle_management"/>
-
+        <menuitem id="menu_vehicle" name="Vehicles" parent="sale.product_menu_catalog" action="action_vehicle_management" sequence="40"/>
     </data>
 </odoo>
